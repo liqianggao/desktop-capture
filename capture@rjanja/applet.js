@@ -18,6 +18,8 @@ const PopupBaseMenuItem = imports.ui.popupMenu.PopupBaseMenuItem;
 const Switch = imports.ui.popupMenu.Switch;
 const Clutter = imports.gi.Clutter;
 const Lightbox = imports.ui.lightbox;
+const Settings = imports.ui.settings;
+const Signals = imports.signals;
 
 const Util = imports.misc.util;
 const GLib = imports.gi.GLib;
@@ -25,16 +27,6 @@ const Gio = imports.gi.Gio;
 const Lang = imports.lang;
 const St = imports.gi.St;
 const Gtk = imports.gi.Gtk;
-
-let uuid = 'capture@rjanja';
-
-const Capture = imports.ui.appletManager.applets[uuid];
-const Screenshot = Capture.screenshot;
-const AppletDir = imports.ui.appletManager.appletMeta[uuid].path;
-const SUPPORT_FILE = AppletDir + '/support.json';
-const SETTINGS_FILE = AppletDir + '/settings.json';
-const ICON_FILE = AppletDir + '/retro-icon-mint.png';
-const CLIPBOARD_HELPER = AppletDir + '/clip.py';
 
 const CAMERA_PROGRAM_GNOME = 'gnome-screenshot';
 const KEY_GNOME_SCREENSHOT_SCHEMA = "org.gnome.gnome-screenshot"
@@ -47,6 +39,15 @@ const KEY_RECORDER_FILE_EXTENSION = "file-extension";
 const KEY_RECORDER_PIPELINE = "pipeline";
 
 const IMGUR_CRED = "85a61980ca1cc59f329ee172245ace84";
+
+// Globals we'll set once we have metadata in main()
+let Capture;
+let Screenshot;
+let AppletDir;
+let SUPPORT_FILE;
+let SETTINGS_FILE;
+let ICON_FILE;
+let CLIPBOARD_HELPER;
 
 function StubbornSwitchMenuItem() {
     this._init.apply(this, arguments);
@@ -247,59 +248,138 @@ function getSettings(schema) {
    }
 }
 
-function MyApplet(orientation) {
-   this._init(orientation);
+function LocalSettings(uuid, instanceId) {
+   this._init(uuid, instanceId);
+}
+LocalSettings.prototype = {
+   _init: function(uuid, instanceId) {
+      this._initialized = false;
+      this._localSettings = false;
+      this._filename = SETTINGS_FILE = AppletDir + '/settings.json';;
+      this._settingsFile = Gio.file_new_for_path(this._filename);
+      this._settings = this._oldSettings = {};
+      this._monitor = this._settingsFile.monitor(Gio.FileMonitorFlags.NONE, null);
+      this._monitor.connect('changed', Lang.bind(this, this._settingsChanged));
+      this._settingsChanged();
+      this._initialized = true;
+   },
+
+   _settingsChanged: function(monitor, fileObj, n, eventType) {
+      //global.log('LocalSettings settingsChanged');
+      if (eventType !== undefined && eventType != Gio.FileMonitorEvent.CHANGES_DONE_HINT) {
+         return;
+      }
+
+      try {
+         this._settings = JSON.parse(Cinnamon.get_file_contents_utf8_sync(this._filename));
+         this.emit("settings-changed");
+         if (this._initialized) {
+            for (var k in this._settings) {
+               if (this._settings[k] !== this._oldSettings[k])
+               {
+                  //global.log('emitting changed::'+k);
+                  this.emit("changed::"+k, k, this._oldSettings[k], this._settings[k]);
+               }
+            }
+         }
+         this._oldSettings = this._settings;
+      }
+      catch (e) {
+         global.logError("Could not parse " + this._filename);
+         global.logError(e);
+      }
+      return true;
+   },
+
+   getValue: function(settings_key) {
+      return this._settings[settings_key];
+   },
+
+   setValue: function(settings_key, value) {
+      this._settings[settings_key] = value;
+      this.writeSettings();
+   },
+
+   writeSettings: function() {
+      let filedata = JSON.stringify(this._settings, null, "   ");
+      GLib.file_set_contents(this._filename, filedata, filedata.length);
+   }
+};
+Signals.addSignalMethods(LocalSettings.prototype);
+
+function MyApplet(metadata, orientation, panelHeight, instanceId) {
+   this._init(metadata, orientation, panelHeight, instanceId);
 }
 
 MyApplet.prototype = {
    __proto__: Applet.IconApplet.prototype,
 
-   _jSettingsChanged: function() {
-      this._modifiers = {};
-      let oldCamera = this._cameraProgram;
-      let oldRecorder = this._recorderProgram;
-      let oldIcon = this._useSymbolicIcon;
+   log: function(msg) {
+      //return;
+      if (typeof msg == 'object') {
+         global.log(msg);
+      }
+      else {
+         global.log(this._uuid + ': ' + msg);
+      }
+      
+   },
 
-      let settingsFile = GLib.build_filenamev([SETTINGS_FILE]);
+   _initSettings: function() {
       try {
-         this._settings = JSON.parse(Cinnamon.get_file_contents_utf8_sync(settingsFile));
+         //xyz();
+         this.settings = new Settings.AppletSettings(this, this._uuid, this._instanceId);
+         this.log('Using AppletSettings');
+         this._localSettings = false;
       }
       catch (e) {
-         global.logError("Could not parse Desktop Capture's settings.json!")
-         global.logError(e);
-         return true;
+         this.log('Falling back to LocalSettings');
+         this.settings = new LocalSettings(this._uuid, this._instanceId);
+         this._localSettings = true;
       }
+      
+      this.settings.connect("settings-changed", Lang.bind(this, this._onSettingsChanged));
+      this.settings.connect("changed::camera-program", Lang.bind(this, this._onRuntimeChanged));
+      this.settings.connect("changed::recorder-program", Lang.bind(this, this._onRuntimeChanged));
+      this.settings.connect("changed::use-symbolic-icon", Lang.bind(this, this._onRuntimeChanged));
 
-      this._includeCursor = this._settings['include-cursor'];
-      this._openAfter = this._settings['open-after'];
-      this._delay = this._settings['delay-seconds'];
-      this._cameraProgram = this._settings['camera-program'];
-      this._recorderProgram = this._settings['recorder-program'];
+      this._onSettingsChanged();
+   },
 
-      this._cameraSaveDir = this._settings['camera-save-dir'];
+   _onSettingsChanged: function(evt, type) {
+      //global.a = arguments;
+      this.log('_onSettingsChanged('+type+')');
+      //this.log('_onSettingsChanged');
+      this._includeCursor = this.settings.getValue('include-cursor');
+      this._openAfter = this.settings.getValue('open-after');
+      this._delay = this.settings.getValue('delay-seconds');
+      this._cameraProgram = this.settings.getValue('camera-program');
+      this._recorderProgram = this.settings.getValue('recorder-program');
+
+      this._cameraSaveDir = this.settings.getValue('camera-save-dir');
       if (this._cameraSaveDir == "" || this._cameraSaveDir === null) {
          this._cameraSaveDir = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES);
       }
 
-      this._recorderSaveDir = this._settings['recorder-save-dir'];
+      this._recorderSaveDir = this.settings.getValue('recorder-save-dir');
       if (this._recorderSaveDir == "" || this._recorderSaveDir === null) {
          this._recorderSaveDir = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_VIDEOS);
       }
 
-      this._cameraSavePrefix = this._settings['camera-save-prefix'];
-      this._recorderSavePrefix = this._settings['recorder-save-prefix'];
-      this._windowAsArea = this._settings['capture-window-as-area'];
-      this._includeWindowFrame = this._settings['include-window-frame'];
-      this._useCameraFlash = this._settings['use-camera-flash'];
-      this._showCaptureTimer = this._settings['show-capture-timer'];
-      this._playShutterSound = this._settings['play-shutter-sound'];
-      this._playIntervalSound = this._settings['play-timer-interval-sound'];
-      this._copyToClipboard = this._settings['copy-to-clipboard'];
-      this._sendNotification = this._settings['send-notification'];
-      this._includeStyles = this._settings['include-styles'];
-      this._modActivatesTimer = this._settings['mod-activates-timer'];
-      this._uploadToImgur = this._settings['upload-to-imgur'];
-      this._useSymbolicIcon = this._settings['use-symbolic-icon'];
+      this._cameraSavePrefix = this.settings.getValue('camera-save-prefix');
+      this._recorderSavePrefix = this.settings.getValue('recorder-save-prefix');
+      this._windowAsArea = this.settings.getValue('capture-window-as-area');
+      this._includeWindowFrame = this.settings.getValue('include-window-frame');
+      this._useCameraFlash = this.settings.getValue('use-camera-flash');
+      this._showCaptureTimer = this.settings.getValue('show-capture-timer');
+      this._playShutterSound = this.settings.getValue('play-shutter-sound');
+      this._playIntervalSound = this.settings.getValue('play-timer-interval-sound');
+      this._copyToClipboard = this.settings.getValue('copy-to-clipboard');
+      this._sendNotification = this.settings.getValue('send-notification');
+      this._includeStyles = this.settings.getValue('include-styles');
+      this._modActivatesTimer = this.settings.getValue('mod-activates-timer');
+      this._uploadToImgur = this.settings.getValue('upload-to-imgur');
+      this._useSymbolicIcon = this.settings.getValue('use-symbolic-icon');
 
       if (this._cameraProgram == 'none')
       {
@@ -311,27 +391,18 @@ MyApplet.prototype = {
          this._recorderProgram = null;
       }
 
-      // Were we called due to a settings change, or by init?
-      if (oldCamera != this._cameraProgram || oldRecorder != this._recorderProgram
-       || oldIcon != this._useSymbolicIcon)
-      {
-         if (this._programSupport['camera'] !== undefined)
-         {
-            this.draw_menu();
-         }
+      if (this._shouldRedraw) {
+         this.draw_menu();
+         this._shouldRedraw = false;
       }
-
-      return false;
    },
 
-   setSettingsKey: function (key, value) {
-      this._settings[key] = value;
-      this.writeSettings();
+   getSettingValue: function(key) {
+      return this.settings.getValue(settings_key);
    },
 
-   writeSettings: function() {
-      let filedata = JSON.stringify(this._settings, null, "   ");
-      GLib.file_set_contents(SETTINGS_FILE, filedata, filedata.length);
+   setSettingValue: function(key, value) {
+      return this.settings.setValue(settings.key, value);
    },
 
    getModifier: function(symbol) {
@@ -366,6 +437,39 @@ MyApplet.prototype = {
       return false;
    },
 
+   _onRuntimeChanged: function(settingsObj, key, oldVal, newVal) {
+      this.log('runtimeChanged: ' + oldVal + ', ' + newVal);
+      this._shouldRedraw = true;
+   },
+
+   _settingsChanged: function(key) {
+      let oldCamera = this._cameraProgram;
+      let oldRecorder = this._recorderProgram;
+      let oldIcon = this._useSymbolicIcon;
+
+      if (this._cameraProgram == 'none')
+      {
+         this._cameraProgram = null;
+      }
+
+      if (this._recorderProgram == 'none')
+      {
+         this._recorderProgram = null;
+      }
+
+      // Were we called due to a settings change, or by init?
+      if (oldCamera != this._cameraProgram || oldRecorder != this._recorderProgram
+      || oldIcon != this._useSymbolicIcon)
+      {
+         if (this._programSupport['camera'] !== undefined)
+         {
+            this.draw_menu();
+         }
+      }
+
+      return false;
+   },
+
     _crSettingsChanged: function(settings, key) {
         if (this._recorderProgram == 'cinnamon')
         {
@@ -377,7 +481,7 @@ MyApplet.prototype = {
         return false;
     },
 
-   _init: function(orientation) {
+   _init: function(metadata, orientation, panelHeight, instanceId) {
       Applet.IconApplet.prototype._init.call(this, orientation);
       
       try {
@@ -394,12 +498,14 @@ MyApplet.prototype = {
          this._redoMenuItem = null;
          this._useSymbolicIcon = false;
          this.lastCapture = null;
+         this._instanceId = instanceId;
+         this._uuid = metadata.uuid;
+         this._shouldRedraw = false;
 
          // Load up our settings
-         this._settingsFile = Gio.file_new_for_path(SETTINGS_FILE);
-         this._monitor = this._settingsFile.monitor(Gio.FileMonitorFlags.NONE, null);
-         this._monitor.connect('changed', Lang.bind(this, this._jSettingsChanged));
-         this._jSettingsChanged();
+         this._initSettings();
+
+         
 
          // GNOME Screenshot settings, we only write cursor option,
          // don't need to read anything from it.
@@ -424,8 +530,6 @@ MyApplet.prototype = {
          let xfixesCursor = Cinnamon.XFixesCursor.get_for_stage(global.stage);
          this._xfixesCursor = xfixesCursor;
 
-         
-         
          this.set_applet_tooltip(_("Screenshot and desktop video"));
 
          this.draw_menu(orientation);
@@ -803,12 +907,17 @@ MyApplet.prototype = {
 
    _toggle_cinnamon_recorder: function(actor, event) {
        if (this.cRecorder.is_recording()) {
-          this.cRecorder.pause();
+          this.cRecorder.close();
           Meta.enable_unredirect_for_screen(global.screen);
        }
        else {
           this.cRecorder.set_framerate(this._crFrameRate);
-          this.cRecorder.set_filename('cinnamon-%d%u-%c.' + this._crFileExtension);
+          if (this.cRecorder['set_filename']) {
+            this.cRecorder.set_filename('cinnamon-%d%u-%c.' + this._crFileExtension);
+          }
+          else if (this.cRecorder['set_file_template']) {
+            this.cRecorder.set_file_template('cinnamon-%d%t.' + this._crFileExtension);
+          }
 
           let pipeline = this._crPipeline;
           global.log("Pipeline is " + pipeline);
@@ -826,7 +935,12 @@ MyApplet.prototype = {
    },
 
    _launch_settings: function() {
-      Main.Util.spawnCommandLine(AppletDir + "/settings.py");
+      if (this._localSettings) {
+         Main.Util.spawnCommandLine(AppletDir + "/settings.py");
+      }
+      else {
+         Main.Util.spawnCommandLine('cinnamon-settings applets '+this._uuid);
+      }
    },
 
    get_camera_program: function() {
@@ -879,6 +993,9 @@ MyApplet.prototype = {
    },
 
    has_camera_support: function(fnType) {
+      global.log(this.get_camera_program());
+      global.co = this.get_camera_options();
+      global.log(this.get_camera_options());
       return this._cameraProgram !== null
         && 'supported' in this.get_camera_options()
         && this.get_camera_options()['supported'][fnType] != undefined;
@@ -1070,9 +1187,16 @@ MyApplet.prototype = {
    },
 };
 
-function main(metadata, orientation) {
-    let myApplet = new MyApplet(orientation);
-    return myApplet;
+function main(metadata, orientation, panelHeight, instanceId) {
+   Capture = imports.ui.appletManager.applets[metadata.uuid];
+   Screenshot = Capture.screenshot;
+   AppletDir = imports.ui.appletManager.appletMeta[metadata.uuid].path;
+   SUPPORT_FILE = AppletDir + '/support.json';
+   ICON_FILE = AppletDir + '/retro-icon-mint.png';
+   CLIPBOARD_HELPER = AppletDir + '/clip.py';
+
+   let myApplet = new MyApplet(metadata, orientation, panelHeight, instanceId);
+   return myApplet;
 }
 
 function str_replace (search, replace, subject, count) {
