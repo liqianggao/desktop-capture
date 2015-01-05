@@ -25,7 +25,8 @@
          "Cinnamon Recorder": "cinnamon",
          "RecordMyDesktop": "gtk-recordmydesktop",
          "Byzanz": "byzanz",
-         "FFmpeg": "ffmpeg"
+         "FFmpeg": "ffmpeg",
+         "avconv": "avconv"
       },
       "description": "Screen recorder program",
       "tooltip": "Preferred screen recorder program"

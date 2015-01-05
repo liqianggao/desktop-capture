@@ -824,6 +824,10 @@ MyApplet.prototype = {
          this._instanceId = instanceId;
          this._uuid = metadata.uuid;
          this._shouldRedraw = false;
+         this._customControls = [];
+         this._customCommandItems = [];
+         this._customSettings = {};
+         this._updateCustomTimeoutId = null;
 
          this.maybeRegisterRole("screenshot", metadata.uuid);
 
@@ -946,6 +950,7 @@ MyApplet.prototype = {
    },
 
    draw_menu: function(orientation) {
+      this._customCommandItems = [];
       this.menuManager = new PopupMenu.PopupMenuManager(this);
       this.menu = new MyAppletPopupMenu(this, this.orientation, this._useTimer);
       this.menuManager.addMenu(this.menu);
@@ -1165,6 +1170,13 @@ MyApplet.prototype = {
                   this.menu.addMenuItem(soundSwitch);
                }
 
+               if (this.has_recorder_option('controls')) {
+                  let customControls = this.get_recorder_option('controls');
+                  for (var control in customControls) {
+                     this.addCustomRecorderControl(customControls[control]);
+                  }
+               }
+
                for (var title in customOptions) {
                   this.addCustomRecorderOption(title, title);
                }
@@ -1174,6 +1186,8 @@ MyApplet.prototype = {
                      this.runCommand(this.get_recorder_option('stop-command'), 'recorder', false);
                   }));
                }
+
+               this._redrawCustomMenus();
 
             }
          }
@@ -1598,9 +1612,83 @@ MyApplet.prototype = {
    },
 
    addCustomRecorderOption: function(title, cmd) {
-      this.menu.addAction(this.indent(title), Lang.bind(this, function(actor, event) {
+      let menuItem = new PopupMenu.PopupMenuItem(title);
+      this.menu.addMenuItem(menuItem);
+      menuItem.connect('activate', Lang.bind(this, function (actor, event) {
          this.runCustomCommand(cmd, 'recorder');
       }));
+      menuItem['_originalLabel'] = title;
+      this._customCommandItems.push(menuItem);
+   },
+
+   _updateCustomSelect: function(o,evt,z,controlName, value) {
+      let menuItems = this._customControls[controlName].menu._getMenuItems();
+      for (var m in menuItems) {
+         menuItems[m].setShowDot(menuItems[m]['_controlValue'] == value);
+      }
+
+      if (null !== this._updateCustomTimeoutId) {
+         Mainloop.source_remove(this._updateCustomTimeoutId);
+      }
+
+      this._customSettings[controlName] = value;
+      global.log('set ' + controlName + ' to value ' + value);
+      this._updateCustomTimeoutId = Mainloop.timeout_add(500, Lang.bind(this, function() {
+         this._redrawCustomMenus();
+         this._updateCustomTimeoutId = null;
+      }));
+   
+      return true;
+   },
+
+   _redrawCustomMenus: function() {
+      global.log('redraw custom menus');
+      for (var i in this._customControls) {
+         this._customControls[i].label.set_text(this._parseCustom(this._customControls[i]['_originalLabel']));
+      }
+
+      for (var i in this._customCommandItems) {
+         this._customCommandItems[i].label.set_text(this._parseCustom(this._customCommandItems[i]['_originalLabel']));
+      }
+   },
+
+   _parseCustom: function(str) {
+      for (var k in this._customSettings) {
+         let repl = this._customSettings[k];
+         str = str.replace('{' + k + '}', repl);
+         str = str.replace('{' + k + '|UPPER}', repl.toUpperCase());
+      }
+      global.log(str);
+      //newStr = this.applyCommandReplacements(str, 'recorder', options, false);
+      return str;
+   },
+
+   addCustomRecorderControl: function(control) {
+      switch (control['type']) {
+         case 'select':
+      // this.menu.addAction(this.indent(control['name']), Lang.bind(this, function(actor, event) {
+      //    global.log("control clicked, var is " + control['var'])
+      // }));
+      this._customControls[control['var']] = new PopupMenu.PopupSubMenuMenuItem(this.indent(_(control['name'])), true);
+      this._customControls[control['var']]['_originalLabel'] = control['name'];
+
+      this.menu.addMenuItem(this._customControls[control['var']]);
+      for (let i = 0; i < control['values'].length; i++) {
+         let item = control['values'][i];
+         //global.log(item['name']);
+         let menuItem = new PopupMenu.PopupMenuItem(item['name']);
+         menuItem['_controlValue'] = item['value'];
+         if (item['value'] == control['default']) {
+            menuItem.setShowDot(true);
+            this._customSettings[control['var']] = item['value'];
+         }
+         menuItem.connect('activate', Lang.bind(this, this._updateCustomSelect, control['var'], item['value']));
+
+         this._customControls[control['var']].menu.addMenuItem(menuItem);
+      }
+
+         break;
+      }
    },
 
    _update_cinnamon_recorder_status: function(actor) {
@@ -1956,6 +2044,7 @@ MyApplet.prototype = {
    // @todo Separate out command-getting from command-parsing
    runCustomCommand: function(custom, mode, appendCommand) {
       let options;
+      global.log('runCustom: ' + custom);
       if (mode == 'camera') {
          options = this.get_camera_options();
       }
@@ -1975,6 +2064,10 @@ MyApplet.prototype = {
          cmd = cmd + ' ' + psAppend;
       }
 
+      if (mode == 'recorder') {
+         cmd = this._parseCustom(cmd);
+      }
+
       this.runCommand(cmd, mode, true);
 
       return false;
@@ -1982,6 +2075,8 @@ MyApplet.prototype = {
 
    runInteractiveCustom: function(cmd, vars) {
       //global.log('runInteractiveCustom');
+      let niceHeight = vars['height'] % 2 == 0 ? vars['height'] : vars['height'] + 1,
+           niceWidth = vars['width']  % 2 == 0 ? vars['width']  : vars['width'] + 1;
 
       let replacements = {
          '{X}': vars['x'],
@@ -1989,7 +2084,8 @@ MyApplet.prototype = {
          '{X_Y}': vars['x']+','+vars['y'],
          '{WIDTH}': vars['width'],
          '{HEIGHT}': vars['height'],
-         
+         '{NICEWIDTH}': niceWidth,
+         '{NICEHEIGHT}': niceHeight
       };
 
       if (vars['window']) {
